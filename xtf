@@ -1,0 +1,229 @@
+#!/bin/sh
+# xlesigm00 Mikuláš Lešiga
+
+export POSIXLY_CORRECT=yes
+export LC_ALL=C
+
+# Function to display help message
+help () {
+    echo "HELP:"
+    echo "usage: xtf [-h|--help] [FILTR] [PŘÍKAZ] UŽIVATEL LOG [LOG2 [...]"
+    echo "HELP can be displayed by writing -h or --help"
+    echo "PŘÍKAZ can be one of:"
+    echo "  list          List records for the given user"
+    echo "  list-currency List sorted list of currencies"
+    echo "  status        Display the actual account status"
+    echo "  profit        Display account status with fictional profit"
+    echo "FILTR can be a combination of:"
+    echo "  -a DATETIME  Consider records after this date and time (exclusive)"
+    echo "  -b DATETIME  Consider records before this date and time (exclusive)"
+    echo "  -c CURRENCY  Consider records with this currency" 
+} 
+
+# Function to validate date-time format
+validate_datetime() {
+    # Define the regular expression pattern
+    datetime_pattern='^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]$'
+    # Check if the input matches the pattern
+    if echo "$1" | grep -qE "$datetime_pattern"; then
+        # If it matches, attempt to parse it with `date`
+        if date -d "$1" > /dev/null 2>&1; then
+            return 0
+        else
+            return 1
+        fi
+    else
+        # If it doesn't match, return failure
+        return 1
+    fi
+}
+
+# Function to validate currency format
+validate_currency() {
+    if echo "$1" | grep -qE '^[a-zA-Z]{3}$'; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Function to check if an arg contains gz format
+contains_gz() {
+    case "$1" in
+        *".gz")
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+#Display help msg
+case "$1" in 
+    -h|--help)
+        help
+        exit 0
+        ;;
+esac
+
+file_exist=false
+
+for arg in "$@"; do
+if [ -f "$arg" ]; then
+file_exist=true
+break  
+fi
+done
+
+if ! $file_exist ; then
+echo "You have to provide a log">&2
+exit 1
+fi
+
+after=""
+before=""
+currency=""
+
+while getopts "a:b:c:" opt ; do 
+  case $opt in
+    a)  
+    if  validate_datetime "$OPTARG" && [ -z "$after" ]; then
+        after=$OPTARG
+        shift 2
+       
+    else 
+        echo "Invalid Date: $OPTARG">&2
+        exit 1
+    fi
+        ;;
+    b)
+    if  validate_datetime "$OPTARG" && [ -z "$before" ]; then
+        before=$OPTARG
+        shift 2
+    else 
+        echo "Invalid Date: $OPTARG">&2
+        exit 1
+    fi
+        ;;
+    c)
+    if  validate_currency "$OPTARG" && [ -z "$currency" ]; then
+        currency=$OPTARG
+        shift 2
+       
+    else 
+     echo "Invalid Currency format: $OPTARG">&2
+        exit 1
+    fi
+        ;;
+    \?)
+        echo "Invalid option: $OPTARG">&2
+        exit 1
+        ;;
+  esac
+done
+
+selected_command="list"
+command_exist=false
+concatenated_output=""
+for arg in "$@"; do
+    # Check if the argument is a log file
+    if [ -f "$arg" ] ; then
+        if [ -z "$user" ]; then
+        echo "You forgot to enter the user.">&2
+        exit 1
+        fi
+        # Process the files into one 
+        if contains_gz "$arg"; then
+            if [ -z "$concatenated_output" ]; then
+                concatenated_output="$(zcat "$arg")" 
+            else
+                concatenated_output="$concatenated_output
+$(zcat "$arg")"
+            fi
+        else
+            if [ -z "$concatenated_output" ]; then
+                concatenated_output="$(cat "$arg")"
+            else
+                concatenated_output="$concatenated_output
+$(cat "$arg")"
+            fi
+        fi
+        shift
+    else
+        # Handle non-log arguments
+        case "$arg" in
+            list|list-currency|status|profit)
+            if $command_exist; then
+            echo "There's something wrong with your arguments, try using -h">&2
+            exit 1
+            fi
+                selected_command="$arg"
+                command_exist=true
+                ;;
+            
+            *)
+            if [ -n "$user" ]; then
+            echo "There's something wrong with your arguments, try using -h">&2
+            exit 1
+            fi
+                user="$arg"
+                ;;
+        esac
+        shift
+    fi
+done
+
+echo "$concatenated_output" | awk -F ";" '{
+    # Validate the number of fields
+    if (NF != 4) {
+        print "Error: The line does not contain exactly four fields:", $0 > "/dev/stderr"
+        exit 1
+    }
+
+    # Validate username
+    if ($1 !~ /^[[:print:]]+$/ || $1 ~ /;/) {
+        print "Error: Invalid username format:", $0 > "/dev/stderr"
+        exit 1
+    }
+
+    # Validate datetime
+    if ($2 !~ /^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01]) (0[0-9]|1[0-9]|2[0-3]):([0-5][0-9]):([0-5][0-9])$/) {
+        print "Error: Invalid date format:", $0 > "/dev/stderr"
+        exit 1
+    }
+
+    # Validate currency
+    if ($3 !~ /^[a-zA-Z]{3}$/) {
+        print "Error: Invalid currency format:", $0 > "/dev/stderr"
+        exit 1
+    }
+
+    # Validate value
+    if ($4 !~ /^-?[0-9]+(\.[0-9]{1,4})?$/) {
+        print "Error: Invalid value format:", $0 > "/dev/stderr"
+        exit 1
+    }
+}' || exit 1
+
+profit=$XTF_PROFIT
+# Process the log file according to the selected command
+case $selected_command in
+    list)
+        # Process the log file for the 'list' command 
+        echo "$concatenated_output" | awk -F ";" -v user="$user" -v currency="$currency" -v after="$after" -v before="$before" '$1 == user && ($3 == currency || currency == "") && ($2 > after || after == "") && ($2 < before || before == "") {print $0}'
+        ;;
+    list-currency)
+        # Process the log file for the 'list-currency' command
+        echo "$concatenated_output" | awk -F ";" -v user="$user" -v currency="$currency" -v after="$after" -v before="$before" '$1 == user && ($3 == currency || currency == "")&& ($2 > after || after == "") && ($2 < before || before == "") {print $3}' | sort -u
+        ;;
+    status)
+        # Process the log file for the 'status' command
+        echo "$concatenated_output" | awk -F ";" -v user="$user" -v currency="$currency" -v after="$after" -v before="$before" '$1 == user && ($3 == currency || currency == "")&& ($2 > after || after == "") && ($2 < before || before == "") {split($4, numbers, " "); typeOfCurrency = $3; for (i in numbers) sum[typeOfCurrency] += numbers[i];} END {for (curr in sum ) printf "%s : %.4f\n", curr, sum[curr];}' | sort -t':' -k1 | uniq 
+        ;;
+    profit)
+        # Process the log file for the 'profit' command
+        echo "$concatenated_output" | awk -F ";" -v user="$user" -v currency="$currency" -v after="$after" -v before="$before" -v profit="$profit" '$1 == user && ($3 == currency || currency == "") && ($2 > after || after == "") && ($2 < before || before == "") {split($4, numbers, " "); typeOfCurrency = $3; for (i in numbers) sum[typeOfCurrency] += numbers[i];} END {for (curr in sum) {if (sum[curr] > 0) {sum[curr] *= (profit == "" ? 1.2 : 1 + profit / 100);} printf "%s : %.4f\n", curr, sum[curr];}}' | sort -t':' -k1 | uniq
+        ;;
+esac
+exit 0
